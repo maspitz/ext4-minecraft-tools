@@ -1,6 +1,9 @@
 from cffi import FFI
 ffibuilder = FFI()
 
+# WARNING: manipulation of filesystems may lead to loss of data, etc.
+# Be sure you know what you are doing.
+
 # Assuming libext2fs is installed (via compilation, or e2fsprogs-devel, etc...)
 
 ffibuilder.set_source("_ext2_cffi",
