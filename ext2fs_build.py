@@ -92,8 +92,13 @@ typedef int...		ext2_off64_t;
 typedef int...		e2_blkcnt_t;
 typedef int...		ext2_dirhash_t;
 typedef int...          time_t;
-typedef int...          __u32;
-typedef int...          __u16;
+typedef int... __u64;
+typedef int... __u32;
+typedef int... __u16;
+typedef int... __u8;
+typedef int... __le32;
+typedef int... __le16;
+typedef int... __s16;
 
 typedef struct struct_ext2_filsys *ext2_filsys;
 
