@@ -349,6 +349,16 @@ struct ext2_super_block {
 errcode_t ext2fs_open(const char *name, int flags, int superblock,
 			     unsigned int block_size, io_manager manager,
 			     ext2_filsys *ret_fs);
+
+extern io_manager unix_io_manager;
+
+extern char const *error_message(long);
+
+extern errcode_t ext2fs_read_inode_bitmap (ext2_filsys fs);
+
+extern errcode_t ext2fs_read_block_bitmap(ext2_filsys fs);
+
+
 """)
 
 
