@@ -354,8 +354,9 @@ extern io_manager unix_io_manager;
 
 extern char const *error_message(long);
 
-extern errcode_t ext2fs_read_inode_bitmap (ext2_filsys fs);
+extern blk64_t ext2fs_free_blocks_count(struct ext2_super_block *super);
 
+extern errcode_t ext2fs_read_inode_bitmap (ext2_filsys fs);
 extern errcode_t ext2fs_read_block_bitmap(ext2_filsys fs);
 
 
