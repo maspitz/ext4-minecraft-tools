@@ -350,14 +350,27 @@ errcode_t ext2fs_open(const char *name, int flags, int superblock,
 			     unsigned int block_size, io_manager manager,
 			     ext2_filsys *ret_fs);
 
-extern io_manager unix_io_manager;
+io_manager unix_io_manager;
 
-extern char const *error_message(long);
+char const *error_message(long);
 
-extern blk64_t ext2fs_free_blocks_count(struct ext2_super_block *super);
+blk64_t ext2fs_free_blocks_count(struct ext2_super_block *super);
 
-extern errcode_t ext2fs_read_inode_bitmap (ext2_filsys fs);
-extern errcode_t ext2fs_read_block_bitmap(ext2_filsys fs);
+errcode_t ext2fs_read_inode_bitmap(ext2_filsys fs);
+errcode_t ext2fs_read_block_bitmap(ext2_filsys fs);
+
+int ext2fs_test_block_bitmap(ext2fs_block_bitmap bitmap, blk_t block);
+int ext2fs_test_inode_bitmap(ext2fs_inode_bitmap bitmap, ext2_ino_t inode);
+
+/* the 'fast' variants have no bounds checking, etc. */
+int ext2fs_fast_test_block_bitmap(ext2fs_block_bitmap bitmap, blk_t block);
+int ext2fs_fast_test_inode_bitmap(ext2fs_inode_bitmap bitmap, ext2_ino_t inode);
+
+errcode_t io_channel_read_blk64(io_channel channel,
+				       unsigned long long block,
+				       int count, void *data);
+
+int CFFI_ext2_max_block_size;
 
 
 """)
