@@ -10,14 +10,11 @@ ffibuilder.set_source("_ext2_cffi",
                       """
                       #include <ext2fs/ext2fs.h>
                       #include <et/com_err.h>
-                      
+                      int CFFI_ext2_max_block_size = EXT2_MAX_BLOCK_SIZE;
                       """,
                       libraries=['ext2fs'])
 
 ffibuilder.cdef("""
-
-
-
 void initialize_ext2_error_table(void);
 typedef int... errcode_t;
 typedef struct struct_io_manager *io_manager;
@@ -212,6 +209,7 @@ struct struct_ext2_filsys {
 };
 
 
+
 /*
  * Structure of the super block
  */
@@ -261,7 +259,7 @@ struct ext2_super_block {
 /*060*/	__u32	s_feature_incompat;	/* incompatible feature set */
 	__u32	s_feature_ro_compat;	/* readonly-compatible feature set */
 /*068*/	__u8	s_uuid[16] ;		/* 128-bit uuid for volume */
-/* assuming #define EXT2_LABEL_LEN 16  ... */
+/* assuming #define EXT2_LABEL_LEN 16 */
 /*078*/	__u8	s_volume_name[16] ;	/* volume name, no NUL? */
 /*088*/	__u8	s_last_mounted[64] ;	/* directory last mounted on, no NUL? */
 /*0c8*/	__u32	s_algorithm_usage_bitmap; /* For compression */
