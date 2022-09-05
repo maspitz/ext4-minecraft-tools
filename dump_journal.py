@@ -2,68 +2,157 @@ import struct
 from dataclasses import dataclass
 from collections import namedtuple
 
-filename = "journal-anvils.img"
+from enum import IntFlag
 
-with open(filename, mode='rb') as file:
-    data = file.read()
 
-JBD2_HEADER = b'\xc0;9\x98\x00\x00\x00\x04\x00\x00\x00\x00'
-s_header = data[0:12]
+# constants from <linux/jbd2.h>
+JBD2_MAGIC_NUMBER = 0xc03b3998
 
-if s_header != JBD2_HEADER:
-    raise ValueError("JBD2 header not found.  (Is this really a journal file?)")
+JBD2_DESCRIPTOR_BLOCK	= 1
+JBD2_COMMIT_BLOCK	= 2
+JBD2_SUPERBLOCK_V1	= 3
+JBD2_SUPERBLOCK_V2	= 4
+JBD2_REVOKE_BLOCK	= 5
 
-def jbd2_superblock_v1(data):
-    JBD2_SB_V1 = namedtuple("JBD2_SB_V1",
-                            "header,blocksize,maxlen,first,sequence,start,errno")
-    return JBD2_SB_V1(
-        *struct.unpack(">12sIIIIII",data[:0x24]))
+JBD2_CRC32_CHKSUM   = 1
+JBD2_MD5_CHKSUM     = 2
+JBD2_SHA1_CHKSUM    = 3
+JBD2_CRC32C_CHKSUM  = 4
 
-@dataclass
-class J_Superblock:
-    header: bytes
-    blocksize: int
-    maxlen: int
-    first: int
-    sequence: int
-    start: int
-    errno: int
-    feature_compat: int
-    feature_incompat: int
-    feature_ro_compat: int
-    uuid: tuple
-    nr_users: int
-    dynsuper: int
-    max_transaction: int
-    max_trans_data: int
-    checksum_type: int
-    padding2: tuple
-    padding: tuple
-    checksum: int
-    users: tuple
+JBD2_FEATURE_COMPAT_CHECKSUM		= 0x00000001
 
-def get_j_superblock(data: bytes):
-    SUPERBLOCK_FORMAT = (
-        ">" # big-endian
-        "12s" # jbd2 12-byte header
-        "I" # blocksize
-        "I" # maxlen
-        "I" # first
-        "I" # sequence
-        "I" # start
-        "I" # errno
-        "I" # feature_compat
-        "I" # feature_incompat
-        "I" # feature_ro_compat
-        "16s" # uuid
-        "I" # nr_users
-        "I" # dynsuper
-        "I" # max_transaction
-        "I" # max_trans_data
-        "B" # checksum_type
-        "3s" # padding2
-        "42s" # padding
-        "I" # checksum
-        "768s" # users
-    )
-    return J_Superblock(*struct.unpack(SUPERBLOCK_FORMAT,data[:898]))
+class FeatureIncompat(IntFlag):
+    REVOKE = 0x01
+    _64BIT = 0x02
+    ASYNC_COMMIT = 0x04
+    CSUM_V2 = 0x08
+    CSUM_V3 = 0x10
+    FAST_COMMIT = 0x20
+
+JBD2_KNOWN_INCOMPAT_FEATURES	= sum(FeatureIncompat.__members__.values())
+
+SUPERBLOCK_FORMAT = (
+    ">" # big-endian
+    "I" # JBD2 magic number
+    "I" # blocktype
+    "I" # header_padding
+    "I" # blocksize
+    "I" # maxlen
+    "I" # first
+    "I" # sequence
+    "I" # start
+    "I" # errno
+    "I" # feature_compat
+    "I" # feature_incompat
+    "I" # feature_ro_compat
+    "16s" # uuid
+    "I" # nr_users
+    "I" # dynsuper
+    "I" # max_transaction
+    "I" # max_trans_data
+    "B" # checksum_type
+    "3s" # padding2
+    "42s" # padding
+    "I" # checksum
+    "768s" # users
+)
+
+Superblock = namedtuple("Superblock",
+                        "magic_number,blocktype,header_padding,"
+                        "blocksize,maxlen,first,sequence,start,errno,"
+                        "feature_compat,feature_incompat,feature_ro_compat,uuid,"
+                        "nr_users,dynsuper,max_transaction,max_trans_data,checksum_type,"
+                        "padding2,padding,checksum,users")
+
+HEADER_FORMAT = (
+    ">" # big-endian
+    "I" # JBD2 magic number
+    "I" # blocktype
+    "I" # sequence
+)
+
+Header = namedtuple("Header", "magic_number,blocktype,sequence")
+
+DataBlock = namedtuple("DataBlock", "data")
+DescriptorBlock = namedtuple("DescriptorBlock", "sequence,data")
+CommitBlock = namedtuple("CommitBlock", "sequence,data")
+RevokeBlock = namedtuple("RevokeBlock", "sequence,data")
+
+class JBD2:
+    """Class to read jbd2 journal transactions"""
+    def __init__(self, filename: str):
+        """Open the journal 'filename'."""
+        self.file = open(filename, mode='rb')
+        if not self.file.seekable():
+            raise ValueError("Seekable input required.")
+        self.superblock = self._read_superblock()
+        if self.superblock.magic_number != JBD2_MAGIC_NUMBER:
+            raise ValueError("Magic number not found.  Is this really JBD2 data?")
+        if self.superblock.blocktype == 3:
+            raise Warning("Superblock v1 detected.  May not work with this application.")
+        elif self.superblock.blocktype != 4:
+            raise ValueError("Superblock unknown version or absent.")
+
+
+    def _read_superblock(self) -> namedtuple:
+        """Read the superblock and record data."""
+        self.file.seek(0)
+        data = self.file.read(1024)
+        if len(data) != 1024:
+            raise EOFError(f"Got only {len(data)} bytes (expected 1024).")
+
+        return Superblock(*struct.unpack(SUPERBLOCK_FORMAT,data[:898]))
+
+    def get_block(self, block_num):
+        """Read and return the specified block."""
+        if block_num < 0 or block_num >= self.superblock.maxlen:
+            raise IndexError(f"Block {block_num} out of range.")
+        self.file.seek(self.superblock.blocksize * block_num)
+        data = self.file.read(self.superblock.blocksize)
+        if len(data) != self.superblock.blocksize:
+            raise EOFError(f"Got only {len(data)} bytes (expected {self.superblock.blocksize})")
+        hdr = Header(*struct.unpack(HEADER_FORMAT, data[:12]))
+        if hdr.magic_number != JBD2_MAGIC_NUMBER:
+            return DataBlock(data)
+        if (hdr.blocktype == JBD2_SUPERBLOCK_V1 or
+            hdr.blocktype == JBD2_SUPERBLOCK_V2):
+            return Superblock(*struct.unpack(SUPERBLOCK_FORMAT, data[:898]))
+        if hdr.blocktype == JBD2_DESCRIPTOR_BLOCK:
+            return DescriptorBlock(hdr.sequence, data)
+        if hdr.blocktype == JBD2_COMMIT_BLOCK:
+            return CommitBlock(hdr.sequence, data)
+        if hdr.blocktype == JBD2_REVOKE_BLOCK:
+            return RevokeBlock(hdr.sequence, data)
+        
+        return hdr
+
+BLOCKTAG3_FORMAT = (
+    ">" # big-endian
+    "I" # blocknr
+    "I" # flags
+    "I" # blocknr_high
+    "I" # checksum
+)
+
+JBD2_FLAG_ESCAPE = 1    # the first 4 bytes of the data block should really be the JBD2 magic number
+JBD2_FLAG_SAME_UUID = 2 # block has same uuid as previous block
+JBD2_FLAG_DELETED = 4   # block is deleted by this transaction (?)
+JBD2_FLAG_LAST_TAG = 8  # marks the last tag in the descriptor block
+
+BlockTag = namedtuple("BlockTag", "magic_number,blocktype,sequence")
+    
+
+def print_descriptor_block(self, d: DescriptorBlock):
+    """Print info about descriptor block."""
+    print(f"Descriptor Block: Sequence {d.sequence}")
+    idx = 12
+    
+
+    
+TEST_FILENAME = "journal-anvils-del.img"
+
+j = JBD2(TEST_FILENAME)
+
+incompat_feature_str = str(FeatureIncompat(j.superblock.feature_incompat))
+
+print(f"Got incompat feature list: {incompat_feature_str}")
