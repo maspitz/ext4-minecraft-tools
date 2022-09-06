@@ -92,6 +92,10 @@ class JBD2:
             raise Warning("Superblock v1 detected.  May not work with this application.")
         elif self.superblock.blocktype != 4:
             raise ValueError("Superblock unknown version or absent.")
+        if self.superblock.feature_incompat & ~JBD2_KNOWN_INCOMPAT_FEATURES:
+            raise ValueError("Unrecognized incompat. features on journal.")
+        if ~(self.superblock.feature_incompat & FeatureIncompat.CSUM_V3):
+            raise ValueError("Unsupported journal because checksum v3 not present.")
 
     def get_block(self, block_num):
         """Read and return the specified block."""
