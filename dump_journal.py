@@ -81,11 +81,10 @@ RevokeBlock = namedtuple("RevokeBlock", "sequence,data")
 class JBD2:
     """Class to read jbd2 journal transactions"""
     def __init__(self, filename: str):
-        """Open the journal 'filename'."""
-        self.file = open(filename, mode='rb')
-        if not self.file.seekable():
-            raise ValueError("Seekable input required.")
-        self.superblock = self._read_superblock()
+        """Open and read the journal file."""
+        with open(filename, mode='rb') as file:
+            self.data = file.read()
+        self.superblock = Superblock(*struct.unpack(SUPERBLOCK_FORMAT,self.data[:898]))
         if self.superblock.magic_number != JBD2_MAGIC_NUMBER:
             raise ValueError("Magic number not found.  Is this really JBD2 data?")
         if self.superblock.blocktype == 3:
@@ -93,24 +92,13 @@ class JBD2:
         elif self.superblock.blocktype != 4:
             raise ValueError("Superblock unknown version or absent.")
 
-
-    def _read_superblock(self) -> namedtuple:
-        """Read the superblock and record data."""
-        self.file.seek(0)
-        data = self.file.read(1024)
-        if len(data) != 1024:
-            raise EOFError(f"Got only {len(data)} bytes (expected 1024).")
-
-        return Superblock(*struct.unpack(SUPERBLOCK_FORMAT,data[:898]))
-
     def get_block(self, block_num):
         """Read and return the specified block."""
         if block_num < 0 or block_num >= self.superblock.maxlen:
             raise IndexError(f"Block {block_num} out of range.")
-        self.file.seek(self.superblock.blocksize * block_num)
-        data = self.file.read(self.superblock.blocksize)
-        if len(data) != self.superblock.blocksize:
-            raise EOFError(f"Got only {len(data)} bytes (expected {self.superblock.blocksize})")
+        start_byte = self.superblock.blocksize * block_num
+        stop_byte = start_byte + self.superblock.blocksize
+        data = self.data[start_byte:stop_byte]
         hdr = Header(*struct.unpack(HEADER_FORMAT, data[:12]))
         if hdr.magic_number != JBD2_MAGIC_NUMBER:
             return DataBlock(data)
@@ -142,7 +130,7 @@ JBD2_FLAG_LAST_TAG = 8  # marks the last tag in the descriptor block
 BlockTag = namedtuple("BlockTag", "magic_number,blocktype,sequence")
     
 
-def print_descriptor_block(self, d: DescriptorBlock):
+def print_descriptor_block(d: DescriptorBlock):
     """Print info about descriptor block."""
     print(f"Descriptor Block: Sequence {d.sequence}")
     idx = 12
