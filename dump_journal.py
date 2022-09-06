@@ -116,7 +116,7 @@ class JBD2:
             return CommitBlock(hdr.sequence, data)
         if hdr.blocktype == JBD2_REVOKE_BLOCK:
             return RevokeBlock(hdr.sequence, data)
-        
+
         return hdr
 
 BLOCKTAG3_FORMAT = (
@@ -125,6 +125,7 @@ BLOCKTAG3_FORMAT = (
     "I" # flags
     "I" # blocknr_high
     "I" # checksum
+    
 )
 
 JBD2_FLAG_ESCAPE = 1    # the first 4 bytes of the data block should really be the JBD2 magic number
@@ -132,14 +133,33 @@ JBD2_FLAG_SAME_UUID = 2 # block has same uuid as previous block
 JBD2_FLAG_DELETED = 4   # block is deleted by this transaction (?)
 JBD2_FLAG_LAST_TAG = 8  # marks the last tag in the descriptor block
 
-BlockTag = namedtuple("BlockTag", "magic_number,blocktype,sequence")
-    
+BlockTag3 = namedtuple("BlockTag3", "blocknr, flags, blocknr_high, checksum")
+
+
+
 
 def print_descriptor_block(d: DescriptorBlock):
     """Print info about descriptor block."""
     print(f"Descriptor Block: Sequence {d.sequence}")
     idx = 12
+    while idx < 1024:
+        bt = BlockTag3(*struct.unpack(BLOCKTAG3_FORMAT, d.data[idx:idx+16]))
+        print(bt)
+        # FIXME - also handle 128 bit uuid (16 bytes)
+        if bt.flags & JBD2_FLAG_LAST_TAG:
+            break
+        idx += 16
     
+
+
+def print_descs(j):
+    for i in range(j.superblock.maxlen):
+        x = j.get_block(i)
+        if type(x) == DescriptorBlock:
+            print(f"Block {i}:")
+            print_descriptor_block(x)
+    
+        
 
     
 TEST_FILENAME = "journal-anvils-del.img"
@@ -149,3 +169,6 @@ j = JBD2(TEST_FILENAME)
 incompat_feature_str = str(FeatureIncompat(j.superblock.feature_incompat))
 
 print(f"Got incompat feature list: {incompat_feature_str}")
+
+"""
+If using csum3, then simply journal_block_tag3_t
