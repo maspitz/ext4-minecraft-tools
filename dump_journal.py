@@ -22,14 +22,15 @@ JBD2_CRC32C_CHKSUM  = 4
 JBD2_FEATURE_COMPAT_CHECKSUM		= 0x00000001
 
 class FeatureIncompat(IntFlag):
-    REVOKE = 0x01
-    _64BIT = 0x02
-    ASYNC_COMMIT = 0x04
-    CSUM_V2 = 0x08
-    CSUM_V3 = 0x10
+    REVOKE = 0x01         # has block revocation records
+    _64BIT = 0x02         # can have 64-bit block numbers
+    ASYNC_COMMIT = 0x04   # asynchronous commits of journal
+    CSUM_V2 = 0x08        # v2 of checksum format
+    CSUM_V3 = 0x10        # v3 of checksum format (fixed journal block tag size)
     FAST_COMMIT = 0x20
 
 JBD2_KNOWN_INCOMPAT_FEATURES	= sum(FeatureIncompat.__members__.values())
+JBD2_KNOWN_COMPAT_FEATURES = JBD2_FEATURE_COMPAT_CHECKSUM
 
 SUPERBLOCK_FORMAT = (
     ">" # big-endian
