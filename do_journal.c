@@ -735,6 +735,7 @@ static errcode_t journal_find_head(journal_t *journal)
 
 		switch (blocktype) {
 		case JBD2_DESCRIPTOR_BLOCK:
+
 			next_log_block += count_tags(journal, bh->b_data);
 			wrap(journal, next_log_block);
 			continue;
@@ -996,6 +997,52 @@ static int jread(struct buffer_head **bhp, journal_t *journal,
         return 0;
 }
 
+static unsigned int div_ceil(unsigned int a, unsigned int b) {
+	if (!a)
+		return 0;
+	return ((a - 1) / b) + 1;
+}
+
+/* if the block is used to store an inode table, return the first inode number
+ * stored by that block.  if the block is not part of an inode table, return 0. */
+static ext2_ino_t inode_table_of_block(ext2_filsys fs, unsigned long long block) {
+	for (int grp = 0; grp < fs->group_desc_count; grp++) {
+		unsigned long long i_t_loc = ext2fs_inode_table_loc(fs, grp);
+		unsigned int inodes_per_group = fs->super->s_inodes_per_group;
+		/*unsigned int inodes_per_block = fs->blocksize / sizeof(struct ext2_inode);*/
+		unsigned int inodes_per_block = EXT2_BLOCK_SIZE(fs->super) / fs->super->s_inode_size;
+		unsigned int inode_table_nr_blocks = div_ceil(inodes_per_group, inodes_per_block);
+
+		blk64_t inode_table_start = ext2fs_inode_table_loc(fs, grp);
+		blk64_t inode_table_stop = inode_table_start + inode_table_nr_blocks;
+		if (block >= inode_table_start && block < inode_table_stop) {
+			ext2_ino_t inode = 1 + grp * inodes_per_group + (block - inode_table_start) * inodes_per_block;
+			return inode;
+		}
+	}
+	return 0;
+}
+
+
+const char *journal_block_type_name(int blocktype) {
+	switch (blocktype) {
+		case JBD2_DESCRIPTOR_BLOCK:
+			return "descriptor block";
+		case JBD2_COMMIT_BLOCK:
+			return "commit block";
+		case JBD2_REVOKE_BLOCK:
+			return "revoke block";
+		case JBD2_SUPERBLOCK_V1:
+			return "superblock (v1)";
+		case JBD2_SUPERBLOCK_V2:
+			return "superblock (v2)";
+		case JBD2_FC_BLOCK:
+			/* note: fast commit block should not appear in on-disk journal... */
+			return "FAST COMMIT block";
+		default:
+			return "UNKNOWN TYPE block";
+	}
+}
 
 void do_journal_scan(int argc EXT2FS_ATTR((unused)),
 		      char *argv[] EXT2FS_ATTR((unused)),
@@ -1003,26 +1050,33 @@ void do_journal_scan(int argc EXT2FS_ATTR((unused)),
 		      void *infop EXT2FS_ATTR((unused)))
 {
 	journal_t 		*journal = current_journal;
-	journal_superblock_t	*jsb = journal->j_superblock;
+	journal_superblock_t	*jsb;
 	struct buffer_head	*bh;
-	unsigned long		next_log_block = jsb->s_start;
+	unsigned long		next_log_block;
 	int	err = 0;
 	journal_header_t	*tmp;
 	int blocktype;
 	unsigned int sequence;
 	unsigned int next_commit_ID;
+	int wrong_magic_total = 0;
 
 	if (journal == NULL) {
 		printf("Journal not open.\n");
 		return;
 	}
 
-	printf("JOURNAL: seq=%u tailseq=%u start=%lu first=%lu "
+	jsb = journal->j_superblock;
+	next_log_block = jsb->s_start;
+	next_commit_ID = ext2fs_be32_to_cpu(jsb->s_sequence);
+
+	fprintf(stderr,"JOURNAL: seq=%u tailseq=%u start=%lu first=%lu "
 		   "maxlen=%lu\n", journal->j_tail_sequence,
 		   journal->j_transaction_sequence, journal->j_tail,
 		   journal->j_first, journal->j_last);
 
 
+
+	for(next_log_block = jsb->s_start; next_log_block < journal->j_last; next_log_block++) {
 
 	err = jread(&bh, journal, next_log_block);
 	if (err)
@@ -1032,18 +1086,62 @@ void do_journal_scan(int argc EXT2FS_ATTR((unused)),
 	tmp = (journal_header_t *)bh->b_data;
 
 	if (tmp->h_magic != ext2fs_cpu_to_be32(JBD2_MAGIC_NUMBER)) {
-		printf("JBD2: wrong magic 0x%x\n", tmp->h_magic);
-		return;
+		if (wrong_magic_total < 10) {
+			printf("JBD2: wrong magic 0x%x\n", tmp->h_magic);
+			wrong_magic_total++;
+		}
+		continue;
 	}
 
 	blocktype = ext2fs_be32_to_cpu(tmp->h_blocktype);
 	sequence = ext2fs_be32_to_cpu(tmp->h_sequence);
-	printf("Found magic %d, sequence %d\n", blocktype, sequence);
+	printf("Sequence %d: %s", sequence, journal_block_type_name(blocktype));
+
+	switch (blocktype) {
+		case JBD2_DESCRIPTOR_BLOCK:
+			int n_tags = count_tags(journal, bh->b_data);
+			printf("\t(%d tags)\n", n_tags);
+
+			/* find destination blocks from tags */
+			journal_block_tag_t	*tag;
+			char			*tagp = bh->b_data + sizeof(journal_header_t);
+			int			tag_bytes = journal_tag_bytes(journal);
+			int			size = journal->j_blocksize;
+
+			if (jbd2_journal_has_csum_v2or3(journal))
+				size -= sizeof(struct jbd2_journal_block_tail);
+
+			while ((tagp - bh->b_data + tag_bytes) <= size) {
+				tag = (journal_block_tag_t *) tagp;
+				unsigned long long block = be32_to_cpu(tag->t_blocknr);
+				if (jbd2_has_feature_64bit(journal))
+					block |= (u64)be32_to_cpu(tag->t_blocknr_high) << 32;
+				printf("\tData for block %llu\n", block);
+				ext2_ino_t inum = inode_table_of_block(current_fs, block);
+				if (inum != 0) {
+					printf("\t\tBlock contains inodes starting with %u\n", inum);
+				}
+				tagp += tag_bytes;
+				if (!(tag->t_flags & ext2fs_cpu_to_be16(JBD2_FLAG_SAME_UUID)))
+					tagp += 16;
+				if (tag->t_flags & ext2fs_cpu_to_be16(JBD2_FLAG_LAST_TAG))
+					break;
+			}
+
+
+			next_log_block += n_tags;
+			wrap(journal, next_log_block);
+			break;
+		default:
+			printf("\n");
+	}
 
 	if (sequence != next_commit_ID) {
 		printf("JBD2: Wrong sequence %d (wanted %d)\n",
 			   sequence, next_commit_ID);
-		return;
+	/*	return; */
+	}
+
 	}
 }
 
