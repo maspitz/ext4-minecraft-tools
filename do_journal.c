@@ -1044,6 +1044,219 @@ const char *journal_block_type_name(int blocktype) {
 	}
 }
 
+/* copied from debugfs.c's dump_extents() */
+/* made to dump from a provided inode structure, rather than a number */
+#define DUMP_LEAF_EXTENTS       0x01
+#define DUMP_NODE_EXTENTS       0x02
+#define DUMP_EXTENT_TABLE       0x04
+
+static void dump_extents2(FILE *f, const char *prefix, ext2_ino_t ino,
+                         struct ext2_inode *inode,
+                         int flags, int logical_width, int physical_width)
+{
+        ext2_extent_handle_t    handle;
+        struct ext2fs_extent    extent;
+        struct ext2_extent_info info;
+        int                     op = EXT2_EXTENT_ROOT;
+        unsigned int            printed = 0;
+        errcode_t               errcode;
+
+	if (inode)
+        	errcode = ext2fs_extent_open2(current_fs, ino, inode, &handle);
+	else
+		errcode = ext2fs_extent_open(current_fs, ino, &handle);
+        if (errcode)
+                return;
+
+        if (flags & DUMP_EXTENT_TABLE)
+                fprintf(f, "Level Entries %*s %*s Length Flags\n",
+                        (logical_width*2)+3, "Logical",
+                        (physical_width*2)+3, "Physical");
+        else
+                fprintf(f, "%sEXTENTS:\n%s", prefix, prefix);
+
+        while (1) {
+                errcode = ext2fs_extent_get(handle, op, &extent);
+
+                if (errcode)
+                        break;
+
+                op = EXT2_EXTENT_NEXT;
+
+                if (extent.e_flags & EXT2_EXTENT_FLAGS_SECOND_VISIT)
+                        continue;
+
+                if (extent.e_flags & EXT2_EXTENT_FLAGS_LEAF) {
+                        if ((flags & DUMP_LEAF_EXTENTS) == 0)
+                                continue;
+                } else {
+                        if ((flags & DUMP_NODE_EXTENTS) == 0)
+                                continue;
+                }
+
+                errcode = ext2fs_extent_get_info(handle, &info);
+                if (errcode)
+                        continue;
+
+
+                if (!(extent.e_flags & EXT2_EXTENT_FLAGS_LEAF)) {
+                        if (extent.e_flags & EXT2_EXTENT_FLAGS_SECOND_VISIT)
+                                continue;
+
+                        if (flags & DUMP_EXTENT_TABLE) {
+                                fprintf(f, "%2d/%2d %3d/%3d %*llu - %*llu "
+                                        "%*llu%*s %6u\n",
+                                        info.curr_level, info.max_depth,
+                                        info.curr_entry, info.num_entries,
+                                        logical_width,
+                                        (unsigned long long) extent.e_lblk,
+                                        logical_width,
+                                        (unsigned long long) extent.e_lblk + (extent.e_len - 1),
+                                        physical_width,
+                                        (unsigned long long) extent.e_pblk,
+                                        physical_width+3, "", extent.e_len);
+                                continue;
+                        }
+
+                        fprintf(f, "%s(ETB%d):%llu",
+                                printed ? ", " : "", info.curr_level,
+                                (unsigned long long) extent.e_pblk);
+                        printed = 1;
+                        continue;
+                }
+
+                if (flags & DUMP_EXTENT_TABLE) {
+                        fprintf(f, "%2d/%2d %3d/%3d %*llu - %*llu "
+                                "%*llu - %*llu %6u %s\n",
+                                info.curr_level, info.max_depth,
+                                info.curr_entry, info.num_entries,
+                                logical_width,
+                                (unsigned long long) extent.e_lblk,
+                                logical_width,
+                                (unsigned long long) extent.e_lblk + (extent.e_len - 1),
+                                physical_width,
+                                (unsigned long long) extent.e_pblk,
+                                physical_width,
+                                (unsigned long long) extent.e_pblk + (extent.e_len - 1),
+                                extent.e_len,
+                                extent.e_flags & EXT2_EXTENT_FLAGS_UNINIT ?
+                                        "Uninit" : "");
+                        continue;
+                }
+
+                if (extent.e_len == 0)
+                        continue;
+                else if (extent.e_len == 1)
+                        fprintf(f,
+                                "%s(%lld%s):%lld",
+                                printed ? ", " : "",
+                                (unsigned long long) extent.e_lblk,
+                                extent.e_flags & EXT2_EXTENT_FLAGS_UNINIT ?
+                                "[u]" : "",
+                                (unsigned long long) extent.e_pblk);
+                else
+                        fprintf(f,
+                                "%s(%lld-%lld%s):%lld-%lld",
+                                printed ? ", " : "",
+                                (unsigned long long) extent.e_lblk,
+                                (unsigned long long) extent.e_lblk + (extent.e_len - 1),
+                                extent.e_flags & EXT2_EXTENT_FLAGS_UNINIT ?
+                                        "[u]" : "",
+                                (unsigned long long) extent.e_pblk,
+                                (unsigned long long) extent.e_pblk + (extent.e_len - 1));
+                printed = 1;
+        }
+        if (printed)
+                fprintf(f, "\n");
+        ext2fs_extent_free(handle);
+}
+
+
+void do_journal_iview(int argc,
+		      char **argv,
+		      int sci_idx EXT2FS_ATTR((unused)),
+		      void *infop EXT2FS_ATTR((unused)))
+{
+	journal_t 		*journal = current_journal;
+	journal_superblock_t	*jsb;
+	char *tmp;
+	unsigned long journal_data_block;
+	struct buffer_head	*bh;
+	int err = 0;
+
+	if (argc < 1) {
+		com_err(argv[0], 0, "Usage: journal_iview <journal block number> ...");
+		return;
+	}
+	if (journal == NULL) {
+		com_err(argv[0], 0, "Journal not open.");
+		return;
+	}
+
+	for(int i = 1; i < argc; i++) {
+		journal_data_block = strtoul(argv[i], &tmp, 0);
+		if (*tmp) {
+			com_err(argv[0], 0, "Bad journal block number - %s", argv[i]);
+			return;
+		}
+
+		/* maybe jread would already indicate this error... */
+		if ((journal_data_block < journal->j_first) ||
+				(journal_data_block >= journal->j_last)) {
+			com_err(argv[0], 0, "Journal block number %lu not in range [%lu, %lu)",
+					journal_data_block, journal->j_first, journal->j_last);
+			return;
+		}
+
+		/* read the journal data block into memory */
+		err = jread(&bh, journal, journal_data_block);
+		if (err)
+			fprintf(stderr, "jread: IO error %d.\n", err);
+		if (bh->b_err)
+			fprintf(stderr, "bh->b_err: %d err code.\n", bh->b_err);
+
+		/* check if it's actually not a data block */
+		journal_header_t *j_header = (journal_header_t *)bh->b_data;
+
+
+		if (j_header->h_magic == ext2fs_cpu_to_be32(JBD2_MAGIC_NUMBER)) {
+			int blocktype = ext2fs_be32_to_cpu(j_header->h_blocktype);
+			com_err(argv[0], 0, "Journal block number %lu appears to be a %s, not data.  Skipping...",
+					journal_data_block, journal_block_type_name(blocktype));
+			continue;
+		}
+
+		/* Note: in the context of inode blocks, an escaped jbd2 magic number is not possible,
+		 * so we don't check for one. */
+
+		char *inodep = bh->b_data;
+		char *journal_data_stop = inodep + journal->j_blocksize;
+		while (inodep < journal_data_stop) {
+			struct ext2_inode *inode  = (struct ext2_inode *)inodep;
+			ext2_extent_handle_t handle;
+			errcode_t errcode;
+			struct ext3_extent_header *eh;
+
+			eh = (struct ext3_extent_header *) (&inode->i_block[0]);
+			if (le16_to_cpu(eh->eh_magic) != EXT3_EXT_MAGIC) {
+				fprintf(stdout, "Skipping entry because no extents found.\n");
+			}
+			else {
+				internal_dump_inode(stdout, "", 0, inode, 0);
+				dump_extents2(stdout, "", 0, inode,
+						DUMP_LEAF_EXTENTS|DUMP_NODE_EXTENTS, 0, 0);
+				fprintf(stdout, "\n");
+			}
+			inodep += current_fs->super->s_inode_size;
+		}
+
+
+		/* For each segment, check if it seems to contain an inode */
+		/* Display the inode data or else a message that data was not found */
+	}
+}
+
+
 void do_journal_scan(int argc EXT2FS_ATTR((unused)),
 		      char *argv[] EXT2FS_ATTR((unused)),
 		      int sci_idx EXT2FS_ATTR((unused)),
@@ -1056,12 +1269,11 @@ void do_journal_scan(int argc EXT2FS_ATTR((unused)),
 	int	err = 0;
 	journal_header_t	*tmp;
 	int blocktype;
-	unsigned int sequence;
+	/*unsigned int sequence;*/
 	unsigned int next_commit_ID;
-	int wrong_magic_total = 0;
 
 	if (journal == NULL) {
-		printf("Journal not open.\n");
+		com_err(argv[0], 0, "Journal not open.");
 		return;
 	}
 
@@ -1076,7 +1288,8 @@ void do_journal_scan(int argc EXT2FS_ATTR((unused)),
 
 
 
-	for(next_log_block = jsb->s_start; next_log_block < journal->j_last; next_log_block++) {
+	int count = 0;
+	do {
 
 	err = jread(&bh, journal, next_log_block);
 	if (err)
@@ -1086,21 +1299,20 @@ void do_journal_scan(int argc EXT2FS_ATTR((unused)),
 	tmp = (journal_header_t *)bh->b_data;
 
 	if (tmp->h_magic != ext2fs_cpu_to_be32(JBD2_MAGIC_NUMBER)) {
-		if (wrong_magic_total < 10) {
-			printf("JBD2: wrong magic 0x%x\n", tmp->h_magic);
-			wrong_magic_total++;
-		}
-		continue;
+		goto nextblock;
 	}
 
 	blocktype = ext2fs_be32_to_cpu(tmp->h_blocktype);
+	/*
 	sequence = ext2fs_be32_to_cpu(tmp->h_sequence);
 	printf("Sequence %d: %s", sequence, journal_block_type_name(blocktype));
+	*/
+
+	unsigned int inodes_per_block = EXT2_BLOCK_SIZE(current_fs->super) / current_fs->super->s_inode_size;
 
 	switch (blocktype) {
 		case JBD2_DESCRIPTOR_BLOCK:
 			int n_tags = count_tags(journal, bh->b_data);
-			printf("\t(%d tags)\n", n_tags);
 
 			/* find destination blocks from tags */
 			journal_block_tag_t	*tag;
@@ -1111,16 +1323,26 @@ void do_journal_scan(int argc EXT2FS_ATTR((unused)),
 			if (jbd2_journal_has_csum_v2or3(journal))
 				size -= sizeof(struct jbd2_journal_block_tail);
 
+			unsigned long journal_data_block = next_log_block;
 			while ((tagp - bh->b_data + tag_bytes) <= size) {
+				journal_data_block++;
 				tag = (journal_block_tag_t *) tagp;
 				unsigned long long block = be32_to_cpu(tag->t_blocknr);
 				if (jbd2_has_feature_64bit(journal))
 					block |= (u64)be32_to_cpu(tag->t_blocknr_high) << 32;
-				printf("\tData for block %llu\n", block);
+				printf("Journal %04lu: -> fs block %llu", journal_data_block, block);
 				ext2_ino_t inum = inode_table_of_block(current_fs, block);
 				if (inum != 0) {
-					printf("\t\tBlock contains inodes starting with %u\n", inum);
+					printf("\t(inodes %u-%u) [", inum, inum + inodes_per_block - 1);
+				for(int j = inum; j < inum + inodes_per_block; j++) {
+					if (ext2fs_test_inode_bitmap2(current_fs->inode_map, j)) {
+						printf("+");
+					} else {
+						printf("-");
+					}
 				}
+				}
+				printf("]\n");
 				tagp += tag_bytes;
 				if (!(tag->t_flags & ext2fs_cpu_to_be16(JBD2_FLAG_SAME_UUID)))
 					tagp += 16;
@@ -1130,19 +1352,15 @@ void do_journal_scan(int argc EXT2FS_ATTR((unused)),
 
 
 			next_log_block += n_tags;
-			wrap(journal, next_log_block);
 			break;
 		default:
 			printf("\n");
 	}
 
-	if (sequence != next_commit_ID) {
-		printf("JBD2: Wrong sequence %d (wanted %d)\n",
-			   sequence, next_commit_ID);
-	/*	return; */
-	}
-
-	}
+nextblock:
+	next_log_block++;
+	next_log_block = next_log_block % journal->j_last;
+	} while (next_log_block != jsb->s_start);
 }
 
 void do_journal_run(int argc EXT2FS_ATTR((unused)), char *argv[],
